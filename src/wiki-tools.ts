@@ -250,7 +250,7 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
         // Re-index in Vectorize if content changed
         const updated = sql
           .exec("SELECT * FROM articles WHERE id = ?", resolvedId)
-          .toArray()[0] as ArticleRow | undefined;
+          .toArray()[0] as unknown as ArticleRow | undefined;
 
         if (updated && env.WIKI_VECTORS && (content !== undefined || appendContent !== undefined)) {
           try {
@@ -288,11 +288,11 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
         if (id) {
           row = sql
             .exec("SELECT * FROM articles WHERE id = ?", id)
-            .toArray()[0] as ArticleRow | undefined;
+            .toArray()[0] as unknown as ArticleRow | undefined;
         } else if (slug) {
           row = sql
             .exec("SELECT * FROM articles WHERE slug = ?", slug)
-            .toArray()[0] as ArticleRow | undefined;
+            .toArray()[0] as unknown as ArticleRow | undefined;
         }
         if (!row) return { error: "Article not found" };
         return parseArticleRow(row);
