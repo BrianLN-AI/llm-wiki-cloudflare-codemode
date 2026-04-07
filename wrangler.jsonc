@@ -21,10 +21,10 @@
       { "name": "LintAgent",   "class_name": "LintAgent"   }
     ]
   },
-  // v1: WikiAgent gets SQLite storage; IngestAgent/LintAgent are stateless DOs
+  // All three Agent subclasses need new_sqlite_classes because the agents SDK
+  // uses SQLite internally for scheduling and state management.
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["WikiAgent"] },
-    { "tag": "v2", "new_classes": ["IngestAgent", "LintAgent"] }
+    { "tag": "v1", "new_sqlite_classes": ["WikiAgent", "IngestAgent", "LintAgent"] }
   ],
 
   // R2: raw document storage

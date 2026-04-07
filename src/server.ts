@@ -64,9 +64,20 @@ export class WikiAgent extends AIChatAgent<Env> {
   // Set on first write via initWikiId(); used for CDN cache eviction paths.
   private wikiId = "default";
 
+  // Guard so that DB init runs at most once per DO activation, even when
+  // callables are invoked via native DO RPC (which bypasses partyserver's
+  // #ensureInitialized / onStart path).
+  private _dbReady = false;
+
+  private _ensureDb() {
+    if (this._dbReady) return;
+    initWikiDatabase(this.ctx.storage.sql);
+    this._dbReady = true;
+  }
+
   async onStart() {
     // Create/migrate SQL tables (idempotent — safe to run on every activation)
-    initWikiDatabase(this.ctx.storage.sql);
+    this._ensureDb();
 
     // Recover wikiId from DO KV storage (set once per instance by initWikiId)
     const stored = await this.ctx.storage.get<string>("wikiId");
@@ -109,6 +120,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "List wiki articles with optional FTS search" })
   async getArticles(search?: string) {
+    this._ensureDb();
     const sql = this.ctx.storage.sql;
     if (search) {
       try {
@@ -143,6 +155,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Get a single wiki article by slug (full content)" })
   async getArticleBySlug(slug: string) {
+    this._ensureDb();
     return (
       (this.ctx.storage.sql
         .exec("SELECT * FROM articles WHERE slug = ?", slug)
@@ -152,6 +165,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Get wiki statistics" })
   async getWikiStats() {
+    this._ensureDb();
     const sql = this.ctx.storage.sql;
     const articles = (
       sql.exec("SELECT COUNT(*) as count FROM articles").toArray()[0] as {
@@ -180,6 +194,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Get raw documents list" })
   async getRawDocuments() {
+    this._ensureDb();
     return this.ctx.storage.sql
       .exec(
         "SELECT id, filename, content_type, status, error_message, uploaded_at, processed_at FROM raw_documents ORDER BY uploaded_at DESC"
@@ -194,6 +209,7 @@ export class WikiAgent extends AIChatAgent<Env> {
     r2Key: string,
     contentType: string
   ) {
+    this._ensureDb();
     this.ctx.storage.sql.exec(
       `INSERT INTO raw_documents (id, filename, r2_key, content_type) VALUES (?, ?, ?, ?)`,
       id,
@@ -214,6 +230,7 @@ export class WikiAgent extends AIChatAgent<Env> {
     tags: string[],
     sourceIds: string[]
   ) {
+    this._ensureDb();
     const id = crypto.randomUUID();
     const slug = slugify(title);
     const existing = this.ctx.storage.sql
@@ -242,6 +259,7 @@ export class WikiAgent extends AIChatAgent<Env> {
     idOrSlug: string,
     fields: Record<string, unknown>
   ) {
+    this._ensureDb();
     const isUuid =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
         idOrSlug
@@ -293,6 +311,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Delete a wiki article programmatically" })
   async deleteArticleProgrammatic(idOrSlug: string) {
+    this._ensureDb();
     const isUuid =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
         idOrSlug
@@ -318,6 +337,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Get all articles for lint scan" })
   async getAllArticlesForLint() {
+    this._ensureDb();
     return this.ctx.storage.sql
       .exec("SELECT id, title, slug, content, summary, tags, updated_at FROM articles ORDER BY updated_at DESC")
       .toArray();
@@ -325,6 +345,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Get a single raw document by ID" })
   async getDocumentProgrammatic(id: string) {
+    this._ensureDb();
     return (
       (this.ctx.storage.sql
         .exec(
@@ -337,6 +358,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Mark document as processing" })
   async markDocumentProcessingProgrammatic(id: string) {
+    this._ensureDb();
     this.ctx.storage.sql.exec(
       "UPDATE raw_documents SET status = 'processing' WHERE id = ?",
       id
@@ -345,6 +367,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Mark document as done with article IDs" })
   async markDocumentDoneProgrammatic(id: string, articleIds: string[]) {
+    this._ensureDb();
     this.ctx.storage.sql.exec(
       "UPDATE raw_documents SET status = 'done', processed_ids = ?, processed_at = datetime('now') WHERE id = ?",
       JSON.stringify(articleIds),
@@ -354,6 +377,7 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   @callable({ description: "Mark document as failed with error message" })
   async markDocumentErrorProgrammatic(id: string, error: string) {
+    this._ensureDb();
     this.ctx.storage.sql.exec(
       "UPDATE raw_documents SET status = 'error', error_message = ?, processed_at = datetime('now') WHERE id = ?",
       error,
