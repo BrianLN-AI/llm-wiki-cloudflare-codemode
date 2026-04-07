@@ -116,7 +116,10 @@ export function jsonResponse(
   // Cloudflare strips Vary: * so use specific headers
   headers.set("Vary", "Accept-Encoding");
 
-  return new Response(JSON.stringify(data), { status, headers });
+  return new Response(JSON.stringify(data, (_key, val) =>
+    // Never serialize stack traces to HTTP responses
+    _key === "stack" ? undefined : val
+  ), { status, headers });
 }
 
 // ── Main cache manager ────────────────────────────────────────────────────────
