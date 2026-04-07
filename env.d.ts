@@ -31,6 +31,12 @@ declare namespace Cloudflare {
      * Required for CDN cache eviction from DurableObjects.
      */
     HOST?: string;
+    /**
+     * Optional API key for protecting write endpoints and MCP.
+     * When set, callers must send `Authorization: Bearer <key>`.
+     * Reads (GET) remain public. Use Cloudflare Access for full protection.
+     */
+    API_KEY?: string;
   }
 }
 interface Env extends Cloudflare.Env {}
@@ -43,6 +49,6 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 declare namespace NodeJS {
   interface ProcessEnv
     extends StringifyValues<
-      Pick<Cloudflare.Env, "WORKERS_AI_MODEL" | "HOST">
+      Pick<Cloudflare.Env, "WORKERS_AI_MODEL" | "HOST" | "API_KEY">
     > {}
 }

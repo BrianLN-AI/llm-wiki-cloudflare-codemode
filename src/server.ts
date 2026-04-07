@@ -60,10 +60,20 @@ const WIKI_SYSTEM_PROMPT = `You are a personal knowledge wiki assistant. You mai
 export class WikiAgent extends AIChatAgent<Env> {
   tools!: ReturnType<typeof createWikiTools> & ReturnType<typeof createIngestTools>;
 
+  // The wiki instance ID — stored in DO KV storage so it survives evictions.
+  // Set on first write via initWikiId(); used for CDN cache eviction paths.
+  private wikiId = "default";
+
   async onStart() {
+    // Create/migrate SQL tables (idempotent — safe to run on every activation)
     initWikiDatabase(this.ctx.storage.sql);
+
+    // Recover wikiId from DO KV storage (set once per instance by initWikiId)
+    const stored = await this.ctx.storage.get<string>("wikiId");
+    if (stored) this.wikiId = stored;
+
     this.tools = {
-      ...createWikiTools(this.ctx.storage.sql, this.env),
+      ...createWikiTools(this.ctx.storage.sql, this.env, this.wikiId),
       ...createIngestTools(this.ctx.storage.sql, this.env)
     };
   }
@@ -73,6 +83,26 @@ export class WikiAgent extends AIChatAgent<Env> {
   @callable({ description: "Get TypeScript type definitions for all wiki tools" })
   getToolTypes() {
     return generateTypes(this.tools);
+  }
+
+  // ── Callable: Wiki identity ───────────────────────────────────────────────
+
+  /**
+   * Store the wiki ID in this DO instance so that CDN eviction paths are
+   * correct for named wikis (e.g. /wiki/research/article/...).
+   * Idempotent — safe to call on every write path.
+   */
+  @callable({ description: "Initialize or confirm this wiki instance's ID" })
+  async initWikiId(id: string): Promise<void> {
+    if (this.wikiId !== id) {
+      this.wikiId = id;
+      await this.ctx.storage.put("wikiId", id);
+      // Refresh tools so their eviction closures use the updated wikiId
+      this.tools = {
+        ...createWikiTools(this.ctx.storage.sql, this.env, id),
+        ...createIngestTools(this.ctx.storage.sql, this.env)
+      };
+    }
   }
 
   // ── Callables: REST API ───────────────────────────────────────────────────
@@ -338,7 +368,7 @@ export class WikiAgent extends AIChatAgent<Env> {
     if (!host) return;
     const origin = host.startsWith("http") ? host : `https://${host}`;
     const cm = new WikiCacheManager(origin);
-    await cm.evictArticle(slug);
+    await cm.evictArticle(slug, this.wikiId);
   }
 
   // ── Chat ──────────────────────────────────────────────────────────────────
@@ -365,9 +395,38 @@ export class WikiAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── REST route handlers ───────────────────────────────────────────────────────
+// ── Auth middleware ───────────────────────────────────────────────────────────
+
+/**
+ * Check `Authorization: Bearer <key>` against env.API_KEY.
+ * Returns a 401 Response when auth fails, null when auth passes or is not configured.
+ * Reads (GET) are intentionally not protected here — use Cloudflare Access for
+ * full protection including the /agents/* WebSocket endpoints.
+ */
+function checkAuth(request: Request, env: Env): Response | null {
+  const apiKey = env.API_KEY;
+  if (!apiKey) return null; // No API key configured → open access
+  const auth = request.headers.get("Authorization");
+  if (!auth || auth !== `Bearer ${apiKey}`) {
+    return jsonResponse(
+      { error: "Unauthorized — supply Authorization: Bearer <API_KEY>" },
+      { status: 401 }
+    );
+  }
+  return null;
+}
+
+// ── DO stub helpers ───────────────────────────────────────────────────────────
 
 type WikiStub = InstanceType<typeof WikiAgent>;
+
+function getWikiStub(env: Env, wikiId: string): WikiStub {
+  return env.WikiAgent.get(
+    env.WikiAgent.idFromName(wikiId)
+  ) as unknown as WikiStub;
+}
+
+// ── REST route handlers ───────────────────────────────────────────────────────
 
 async function handleHealth(): Promise<Response> {
   return jsonResponse({ ok: true, timestamp: new Date().toISOString() });
@@ -376,13 +435,14 @@ async function handleHealth(): Promise<Response> {
 async function handleGetArticles(
   request: Request,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  wikiId: string
 ): Promise<Response> {
   const url = new URL(request.url);
   const search = url.searchParams.get("search") ?? undefined;
   const cachePath = search
-    ? `/api/articles?search=${encodeURIComponent(search)}`
-    : "/api/articles";
+    ? `/wiki/${wikiId}/articles?search=${encodeURIComponent(search)}`
+    : `/wiki/${wikiId}/articles`;
   const cm = WikiCacheManager.fromRequest(request);
 
   return serveCached(
@@ -390,9 +450,7 @@ async function handleGetArticles(
     cm,
     cachePath,
     async () => {
-      const stub = env.WikiAgent.get(
-        env.WikiAgent.idFromName("default")
-      ) as unknown as WikiStub;
+      const stub = getWikiStub(env, wikiId);
       const articles = await stub.getArticles(search);
       const lastMod = (articles[0] as { updated_at?: string } | undefined)
         ?.updated_at ?? new Date().toISOString();
@@ -411,9 +469,10 @@ async function handleGetArticle(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
+  wikiId: string,
   slug: string
 ): Promise<Response> {
-  const cachePath = `/api/article/${slug}`;
+  const cachePath = `/wiki/${wikiId}/article/${slug}`;
   const cm = WikiCacheManager.fromRequest(request);
 
   return serveCached(
@@ -421,9 +480,7 @@ async function handleGetArticle(
     cm,
     cachePath,
     async () => {
-      const stub = env.WikiAgent.get(
-        env.WikiAgent.idFromName("default")
-      ) as unknown as WikiStub;
+      const stub = getWikiStub(env, wikiId);
       const article = await stub.getArticleBySlug(slug);
       if (!article) {
         return jsonResponse({ error: "Not found" }, { status: 404 });
@@ -446,9 +503,10 @@ async function handleGetArticle(
 async function handleGetStats(
   request: Request,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  wikiId: string
 ): Promise<Response> {
-  const cachePath = "/api/stats";
+  const cachePath = `/wiki/${wikiId}/stats`;
   const cm = WikiCacheManager.fromRequest(request);
 
   return serveCached(
@@ -456,9 +514,7 @@ async function handleGetStats(
     cm,
     cachePath,
     async () => {
-      const stub = env.WikiAgent.get(
-        env.WikiAgent.idFromName("default")
-      ) as unknown as WikiStub;
+      const stub = getWikiStub(env, wikiId);
       const stats = await stub.getWikiStats();
       const now = new Date().toISOString();
       return jsonResponse(stats, {
@@ -473,20 +529,22 @@ async function handleGetStats(
 
 async function handleGetDocuments(
   request: Request,
-  env: Env
+  env: Env,
+  wikiId: string
 ): Promise<Response> {
   if (request.method !== "GET") {
     return jsonResponse({ error: "Method not allowed" }, { status: 405 });
   }
-  const stub = env.WikiAgent.get(
-    env.WikiAgent.idFromName("default")
-  ) as unknown as WikiStub;
+  const stub = getWikiStub(env, wikiId);
   const docs = await stub.getRawDocuments();
-  // Documents are private — no CDN caching
   return jsonResponse(docs, { maxAge: 0 });
 }
 
-async function handleUpload(request: Request, env: Env): Promise<Response> {
+async function handleUpload(
+  request: Request,
+  env: Env,
+  wikiId: string
+): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, { status: 405 });
   }
@@ -514,7 +572,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
 
   const id = crypto.randomUUID();
   const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const r2Key = `docs/${id}/${safeFilename}`;
+  const r2Key = `${wikiId}/docs/${id}/${safeFilename}`;
 
   try {
     await env.RAW_DOCS.put(r2Key, file.stream(), {
@@ -525,44 +583,43 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
   }
 
   try {
-    const stub = env.WikiAgent.get(
-      env.WikiAgent.idFromName("default")
-    ) as unknown as WikiStub;
+    const stub = getWikiStub(env, wikiId);
     await stub.registerUploadedDocument(id, file.name, r2Key, baseType);
   } catch (e) {
     console.error("Failed to register document in WikiAgent:", e);
   }
 
-  return jsonResponse({ id, filename: file.name, r2Key, contentType: baseType, status: "pending" }, { status: 201 });
+  return jsonResponse({ id, filename: file.name, r2Key, contentType: baseType, status: "pending", wikiId }, { status: 201 });
 }
 
 async function handleIngest(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
+  wikiId: string,
   docId: string
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, { status: 405 });
   }
-  // Fire and forget — IngestAgent processes asynchronously
   const stub = env.IngestAgent.get(
-    env.IngestAgent.idFromName(`ingest-${docId}`)
-  ) as unknown as { processDocument(id: string): Promise<unknown> };
+    env.IngestAgent.idFromName(`ingest-${wikiId}-${docId}`)
+  ) as unknown as { processDocument(id: string, wikiId: string): Promise<unknown> };
 
   ctx.waitUntil(
-    stub.processDocument(docId).catch((e) =>
-      console.error(`IngestAgent failed for ${docId}:`, e)
+    stub.processDocument(docId, wikiId).catch((e) =>
+      console.error(`IngestAgent failed for ${wikiId}/${docId}:`, e)
     )
   );
 
-  return jsonResponse({ queued: true, documentId: docId });
+  return jsonResponse({ queued: true, documentId: docId, wikiId });
 }
 
 async function handleLint(
   request: Request,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  wikiId: string
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, { status: 405 });
@@ -571,16 +628,14 @@ async function handleLint(
   const fix = body.fix === true;
 
   const stub = env.LintAgent.get(
-    env.LintAgent.idFromName("default")
-  ) as unknown as { lintWiki(fix: boolean): Promise<LintReport> };
+    env.LintAgent.idFromName(`lint-${wikiId}`)
+  ) as unknown as { lintWiki(fix: boolean, wikiId: string): Promise<LintReport> };
 
-  // Run synchronously so the caller gets the report
   try {
-    const report = await stub.lintWiki(fix);
-    // After lint fixes, evict the full article list from CDN cache
+    const report = await stub.lintWiki(fix, wikiId);
     if (fix && report.fixesApplied > 0) {
       const cm = WikiCacheManager.fromRequest(request);
-      ctx.waitUntil(cm.evictAll());
+      ctx.waitUntil(cm.evictAll(wikiId));
     }
     return jsonResponse(report);
   } catch (e) {
@@ -595,42 +650,69 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    // ── Health ──────────────────────────────────────────────────────────────
-    if (pathname === "/api/health") return handleHealth();
+    // ── Health (no auth required) ────────────────────────────────────────────
+    if (pathname === "/health") return handleHealth();
 
-    // ── MCP endpoints (no caching — streaming protocol) ─────────────────────
-    const mcpHandlers = createMcpHandlers(
-      env,
-      WikiCacheManager.fromRequest(request)
-    );
-    if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
-      return mcpHandlers.handleMcp(request, ctx);
+    // ── Agent WebSocket + RPC: /agents/:agent/:id ────────────────────────────
+    // routeAgentRequest handles WebSocket upgrades for the chat UI.
+    // Protect with Cloudflare Access for production deployments.
+    const agentResponse = await routeAgentRequest(request, env);
+    if (agentResponse) return agentResponse;
+
+    // ── /wiki/:wikiId/<resource> ─────────────────────────────────────────────
+    // All wiki REST + MCP endpoints live under a wikiId path segment.
+    // This enables multiple independent wikis from a single Worker deployment.
+    const wikiMatch = pathname.match(/^\/wiki\/([^/]+)(\/.*)?$/);
+    if (wikiMatch) {
+      const wikiId = wikiMatch[1];
+      const sub = wikiMatch[2] ?? "/";
+
+      // Auth check on all write operations and MCP endpoints
+      const isMcp = sub === "/mcp" || sub.startsWith("/mcp/") ||
+                    sub === "/codemode-mcp" || sub.startsWith("/codemode-mcp/");
+      const isWrite = request.method !== "GET";
+      if (isWrite || isMcp) {
+        const authErr = checkAuth(request, env);
+        if (authErr) return authErr;
+      }
+
+      // ── CDN-cached reads ─────────────────────────────────────────────────
+      if (sub === "/articles" || sub === "/articles/") {
+        return handleGetArticles(request, env, ctx, wikiId);
+      }
+      const articleMatch = sub.match(/^\/article\/(.+)$/);
+      if (articleMatch) {
+        return handleGetArticle(request, env, ctx, wikiId, articleMatch[1]);
+      }
+      if (sub === "/stats") {
+        return handleGetStats(request, env, ctx, wikiId);
+      }
+      if (sub === "/documents") {
+        return handleGetDocuments(request, env, wikiId);
+      }
+
+      // ── Write paths (no CDN cache, auth required above) ──────────────────
+      if (sub === "/upload") return handleUpload(request, env, wikiId);
+      const ingestMatch = sub.match(/^\/ingest\/(.+)$/);
+      if (ingestMatch) return handleIngest(request, env, ctx, wikiId, ingestMatch[1]);
+      if (sub === "/lint") return handleLint(request, env, ctx, wikiId);
+
+      // ── MCP endpoints (per-wiki, auth required above) ────────────────────
+      const mcpHandlers = createMcpHandlers(
+        env,
+        WikiCacheManager.fromRequest(request),
+        wikiId
+      );
+      if (sub === "/mcp" || sub.startsWith("/mcp/")) {
+        return mcpHandlers.handleMcp(request, ctx);
+      }
+      if (sub === "/codemode-mcp" || sub.startsWith("/codemode-mcp/")) {
+        return mcpHandlers.handleCodemodeMcp(request, ctx);
+      }
+
+      return jsonResponse({ error: "Not found" }, { status: 404 });
     }
-    if (pathname === "/codemode-mcp" || pathname.startsWith("/codemode-mcp/")) {
-      return mcpHandlers.handleCodemodeMcp(request, ctx);
-    }
 
-    // ── REST API (CDN-cached reads, no-store writes) ─────────────────────────
-    if (pathname === "/api/stats") return handleGetStats(request, env, ctx);
-    if (pathname === "/api/articles") return handleGetArticles(request, env, ctx);
-
-    const articleMatch = pathname.match(/^\/api\/article\/(.+)$/);
-    if (articleMatch) {
-      return handleGetArticle(request, env, ctx, articleMatch[1]);
-    }
-
-    if (pathname === "/api/documents") return handleGetDocuments(request, env);
-    if (pathname === "/api/upload") return handleUpload(request, env);
-
-    const ingestMatch = pathname.match(/^\/api\/ingest\/(.+)$/);
-    if (ingestMatch) return handleIngest(request, env, ctx, ingestMatch[1]);
-
-    if (pathname === "/api/lint") return handleLint(request, env, ctx);
-
-    // ── Agent WebSocket + RPC (chat) ─────────────────────────────────────────
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
+    return new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;

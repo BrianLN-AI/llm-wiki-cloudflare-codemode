@@ -11,8 +11,20 @@ export function slugify(title: string): string {
     .trim();
 }
 
-/** Create the SQLite tables (idempotent). */
+/** Create the SQLite tables (idempotent).
+ *
+ * This runs inside the WikiAgent DurableObject on every activation so that
+ * new schema additions are applied automatically without a migration step.
+ * `CREATE TABLE IF NOT EXISTS` and `CREATE TRIGGER IF NOT EXISTS` make every
+ * statement a safe no-op when the object already exists.
+ */
 export function initWikiDatabase(sql: SqlStorage) {
+  // Internal metadata (wikiId, schema version, etc.)
+  sql.exec(`CREATE TABLE IF NOT EXISTS _wiki_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`);
+
   sql.exec(`CREATE TABLE IF NOT EXISTS articles (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -70,8 +82,11 @@ export function initWikiDatabase(sql: SqlStorage) {
   END`);
 }
 
-/** Build all wiki tools wired to the given SqlStorage and env. */
-export function createWikiTools(sql: SqlStorage, env: Env) {
+/** Build all wiki tools wired to the given SqlStorage and env.
+ * @param wikiId  The wiki instance ID — used to construct correct CDN cache
+ *                eviction keys (e.g. `/wiki/research/article/...`).
+ */
+export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
   return {
     createArticle: tool({
       description:
@@ -136,7 +151,7 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
         }
 
         // Evict CDN cache for this slug and the article list
-        await evictArticleCache(env, finalSlug);
+        await evictArticleCache(env, finalSlug, wikiId);
 
         // Store embedding in Vectorize if available
         if (env.WIKI_VECTORS) {
@@ -257,7 +272,7 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
           }
         }
 
-        if (updated) await evictArticleCache(env, updated.slug);
+        if (updated) await evictArticleCache(env, updated.slug, wikiId);
         return updated ?? { error: "Article not found after update" };
       }
     }),
@@ -390,7 +405,7 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
           }
         }
 
-        await evictArticleCache(env, resolvedSlug ?? resolvedId);
+        await evictArticleCache(env, resolvedSlug ?? resolvedId, wikiId);
         return { deleted: resolvedId };
       }
     }),
@@ -563,18 +578,20 @@ async function generateEmbedding(env: Env, text: string): Promise<number[] | nul
 }
 
 /**
- * Evict CDN cache for a specific article slug plus shared list/stats endpoints.
- * Uses caches.default which is available in both Workers and DurableObjects.
+ * Evict CDN cache for a specific article slug plus list/stats endpoints.
+ * Uses `caches.default` which is available in both Workers and DurableObjects.
  * No-ops silently when HOST is not configured (local dev).
+ *
+ * @param wikiId  The wiki instance path segment (e.g. "default", "research").
  */
-async function evictArticleCache(env: Env, slug: string): Promise<void> {
+async function evictArticleCache(env: Env, slug: string, wikiId = "default"): Promise<void> {
   const host = env.HOST;
   if (!host) return;
   const origin = host.startsWith("http") ? host : `https://${host}`;
   const base = origin.replace(/\/$/, "");
   await Promise.allSettled([
-    caches.default.delete(`${base}/api/article/${slug}`),
-    caches.default.delete(`${base}/api/articles`),
-    caches.default.delete(`${base}/api/stats`)
+    caches.default.delete(`${base}/wiki/${wikiId}/article/${slug}`),
+    caches.default.delete(`${base}/wiki/${wikiId}/articles`),
+    caches.default.delete(`${base}/wiki/${wikiId}/stats`)
   ]);
 }

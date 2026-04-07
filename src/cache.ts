@@ -1,14 +1,21 @@
 /**
  * CDN Cache Manager
  *
- * Uses Cloudflare's Cache API (`caches.default`) — the same cache backing
- * Cloudflare's CDN edge — to store and evict API responses.
+ * Uses Cloudflare's Cache API (`caches.default`) — the same cache as Cloudflare's
+ * CDN edge — to store and evict wiki responses.
  *
- * Strategy:
- *   - GET /api/article/:slug  → public, max-age=300 (5 min), stale-while-revalidate=3600
- *   - GET /api/articles       → public, max-age=60  (1 min), stale-while-revalidate=600
- *   - GET /api/stats          → public, max-age=60  (1 min), stale-while-revalidate=300
- *   - Writes (create/update/delete) → evict affected keys immediately
+ * Note on `caches.default` scope:
+ *   - On a **zone-bound worker** (custom domain): `caches.default` IS the global
+ *     Cloudflare CDN edge cache, stored at the PoP nearest each user.
+ *   - On a **workers.dev** subdomain: `caches.default` is a per-datacenter cache
+ *     (still useful for repeat requests within the same DC, but not globally shared).
+ *   For full global CDN benefit, deploy on a custom domain.
+ *
+ * Cache key scheme (wikiId is part of the URL path):
+ *   GET /wiki/:wikiId/article/:slug  → max-age=300 (5 min), swr=3600
+ *   GET /wiki/:wikiId/articles       → max-age=60  (1 min),  swr=600
+ *   GET /wiki/:wikiId/stats          → max-age=60  (1 min),  swr=300
+ *   Writes (create/update/delete)    → evict affected keys immediately
  *
  * ETag / conditional-request support:
  *   - ETag derived from updated_at timestamp (weak etag)
@@ -160,22 +167,22 @@ export class WikiCacheManager {
   // ── Write paths (eviction) ──────────────────────────────────────────────────
 
   /**
-   * Evict all cache entries related to a specific article slug.
+   * Evict all cache entries related to a specific article slug within a wiki.
    * Called after create, update, or delete.
    */
-  async evictArticle(slug: string): Promise<void> {
+  async evictArticle(slug: string, wikiId = "default"): Promise<void> {
     await this.evictPaths([
-      `/api/article/${slug}`,
-      `/api/articles`,
-      `/api/stats`
+      `/wiki/${wikiId}/article/${slug}`,
+      `/wiki/${wikiId}/articles`,
+      `/wiki/${wikiId}/stats`
     ]);
   }
 
-  /** Evict all article-related caches (used after bulk lint/ingest). */
-  async evictAll(): Promise<void> {
-    await this.evictPaths([`/api/articles`, `/api/stats`]);
+  /** Evict list/stats caches for a wiki (used after bulk lint/ingest). */
+  async evictAll(wikiId = "default"): Promise<void> {
+    await this.evictPaths([`/wiki/${wikiId}/articles`, `/wiki/${wikiId}/stats`]);
     // Note: individual article cache keys are evicted lazily via
-    // stale-while-revalidate; a full purge requires the Zones API.
+    // stale-while-revalidate; a full purge requires the Cloudflare Zones API.
   }
 
   private async evictPaths(paths: string[]): Promise<void> {

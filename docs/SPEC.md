@@ -131,7 +131,7 @@ article_links (
 raw_documents (
   id              TEXT PRIMARY KEY,
   filename        TEXT NOT NULL,
-  r2_key          TEXT NOT NULL,
+  r2_key          TEXT NOT NULL,      -- Key in R2 bucket: {wikiId}/docs/{id}/{filename}
   content_type    TEXT DEFAULT 'text/plain',
   status          TEXT DEFAULT 'pending',
   processed_ids   TEXT DEFAULT '[]',  -- JSON array of article IDs created
@@ -141,23 +141,61 @@ raw_documents (
 )
 ```
 
+> **Storage split:** Raw bytes (file content) live in R2 (`r2_key` above). Only metadata + processing state live in SQLite. This keeps the DO small and lets R2 serve large files efficiently. Workers AI's `toMarkdown` API can extract text from PDFs directly from the R2 object.
+
 ## 7. API Contracts
 
-### POST /api/upload
+All paths are prefixed with the wiki instance ID to support multiple independent wikis.
+
+### POST /wiki/:wikiId/upload
 Upload a raw document.
+- Auth: `Authorization: Bearer <API_KEY>` (if `API_KEY` env var is set)
 - Body: `multipart/form-data` with `file` field
-- Response: `{ id, filename, r2_key, status: "pending" }`
+- Response: `{ id, filename, r2Key, status: "pending", wikiId }`
 
-### GET /api/documents
-List all raw documents.
-- Response: `{ documents: RawDocument[] }`
+### GET /wiki/:wikiId/documents
+List all raw documents for this wiki.
+- Response: `RawDocument[]`
 
-### POST /api/agent/:namespace/*
-Agent WebSocket endpoint (handled by `routeAgentRequest`).
+### POST /wiki/:wikiId/ingest/:docId
+Trigger background AI processing of a raw document.
+- Auth: required (write path)
+- Response: `{ queued: true, documentId, wikiId }`
 
-### GET /api/health
-Health check.
-- Response: `{ ok: true, timestamp }`
+### POST /wiki/:wikiId/lint
+Run lint analysis (optionally with fixes).
+- Auth: required (write path)
+- Body: `{ fix?: boolean }`
+- Response: `LintReport`
+
+### GET /wiki/:wikiId/articles[?search=q]
+List or search articles (CDN-cached).
+
+### GET /wiki/:wikiId/article/:slug
+Get a single article by slug (CDN-cached).
+
+### GET /wiki/:wikiId/stats
+Wiki statistics (CDN-cached).
+
+### GET /wiki/:wikiId/mcp
+MCP endpoint (Streamable HTTP). Auth required if `API_KEY` is set.
+
+### WS /agents/wiki-agent/:wikiId
+Agent WebSocket endpoint. Protect with Cloudflare Access in production.
+
+### GET /health
+Health check — no auth required.
+
+## 8. Authentication
+
+| Endpoint class | Auth requirement |
+|---|---|
+| `GET /wiki/:wikiId/*` (reads) | None (CDN-cached public reads) |
+| `POST /wiki/:wikiId/*` (writes) | `Authorization: Bearer <API_KEY>` if `API_KEY` env var is set |
+| `/wiki/:wikiId/mcp`, `/wiki/:wikiId/codemode-mcp` | Same as writes |
+| `/agents/wiki-agent/:wikiId` (WebSocket) | Recommended: Cloudflare Access (zero-trust) |
+
+When `API_KEY` is not set the Worker is in "open" mode — useful for local dev. Set it via `wrangler secret put API_KEY` before production deployment.
 
 ## 8. Quality Requirements
 
@@ -171,7 +209,7 @@ Health check.
 
 ## 9. Open Questions
 
-- [ ] Should we support PDF parsing? (v1: text only, v2: PDF via Workers AI Document Processing)
-- [ ] Should we use Workers AI embeddings or an external embedding API?
-- [ ] Should the wiki be public or require authentication?
+- [x] Should we support PDF parsing? → Yes: use Workers AI `toMarkdown` API on the R2 object. Ref: [workers-ai/features/markdown-conversion](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/)
+- [x] Workers AI embeddings or external? → Workers AI (`@cf/baai/bge-small-en-v1.5`) generates embeddings; Vectorize stores and queries them. Both are native Cloudflare, no external API keys needed.
+- [x] Public or authenticated? → Configurable via `API_KEY` env var. Reads are public; writes require Bearer token. Cloudflare Access recommended for WebSocket chat endpoint.
 - [ ] How large is a typical user's wiki? (affects Vectorize dimension/quota planning)

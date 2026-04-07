@@ -73,7 +73,8 @@ type WikiAgentStub = {
 
 export function createWikiMcpServer(
   wikiStub: WikiAgentStub,
-  cache?: WikiCacheManager
+  cache?: WikiCacheManager,
+  wikiId = "default"
 ): McpServer {
   const server = new McpServer({
     name: "llm-wiki",
@@ -256,7 +257,7 @@ export function createWikiMcpServer(
         // Evict list + stats caches after write
         if (cache) {
           const article = result as { slug?: string };
-          if (article.slug) await cache.evictArticle(article.slug);
+          if (article.slug) await cache.evictArticle(article.slug, wikiId);
         }
         return textResult(result);
       } catch (e) {
@@ -281,7 +282,7 @@ export function createWikiMcpServer(
     async ({ slug, ...fields }) => {
       try {
         const result = await wikiStub.updateArticleProgrammatic(slug, fields);
-        if (cache) await cache.evictArticle(slug);
+        if (cache) await cache.evictArticle(slug, wikiId);
         return textResult(result);
       } catch (e) {
         return errorResult(String(e));
@@ -300,7 +301,7 @@ export function createWikiMcpServer(
     async ({ slug }) => {
       try {
         const result = await wikiStub.deleteArticleProgrammatic(slug);
-        if (cache) await cache.evictArticle(slug);
+        if (cache) await cache.evictArticle(slug, wikiId);
         return textResult(result);
       } catch (e) {
         return errorResult(String(e));
@@ -374,29 +375,33 @@ export function createWikiMcpServer(
 
 // ── HTTP handler factory ──────────────────────────────────────────────────────
 
-export function createMcpHandlers(env: Env, cache?: WikiCacheManager) {
+export function createMcpHandlers(
+  env: Env,
+  cache?: WikiCacheManager,
+  wikiId = "default"
+) {
   return {
-    /** Handle /mcp — standard MCP tool calling */
+    /** Handle /wiki/:wikiId/mcp — standard MCP tool calling */
     async handleMcp(request: Request, ctx: ExecutionContext): Promise<Response> {
       const stub = env.WikiAgent.get(
-        env.WikiAgent.idFromName("default")
+        env.WikiAgent.idFromName(wikiId)
       ) as unknown as WikiAgentStub;
-      const server = createWikiMcpServer(stub, cache);
-      return createMcpHandler(server, { route: "/mcp" })(request, env, ctx);
+      const server = createWikiMcpServer(stub, cache, wikiId);
+      return createMcpHandler(server, { route: `/wiki/${wikiId}/mcp` })(request, env, ctx);
     },
 
-    /** Handle /codemode-mcp — CodeMode-wrapped MCP (LLM writes TypeScript) */
+    /** Handle /wiki/:wikiId/codemode-mcp — CodeMode-wrapped MCP (LLM writes TypeScript) */
     async handleCodemodeMcp(
       request: Request,
       ctx: ExecutionContext
     ): Promise<Response> {
       const stub = env.WikiAgent.get(
-        env.WikiAgent.idFromName("default")
+        env.WikiAgent.idFromName(wikiId)
       ) as unknown as WikiAgentStub;
-      const wikiServer = createWikiMcpServer(stub, cache);
+      const wikiServer = createWikiMcpServer(stub, cache, wikiId);
       const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
       const server = await codeMcpServer({ server: wikiServer, executor });
-      return createMcpHandler(server, { route: "/codemode-mcp" })(
+      return createMcpHandler(server, { route: `/wiki/${wikiId}/codemode-mcp` })(
         request,
         env,
         ctx

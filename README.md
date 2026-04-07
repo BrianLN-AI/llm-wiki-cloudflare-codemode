@@ -10,14 +10,17 @@ An AI-maintained, interlinked personal knowledge base. Upload raw documents; the
 
 | Feature | Implementation |
 |---------|---------------|
-| **Persistent wiki** | SQLite inside a Cloudflare DurableObject |
+| **Multi-wiki** | Each wiki ID gets its own isolated DurableObject — switch wikis with a URL path segment |
+| **Persistent wiki** | SQLite (metadata) + R2 (file bytes) inside a Cloudflare DurableObject |
 | **AI chat** | `AIChatAgent` + [CodeMode](https://blog.cloudflare.com/code-mode-mcp/) — LLM writes TypeScript to orchestrate tools |
 | **Semantic search** | Cloudflare Vectorize + `@cf/baai/bge-small-en-v1.5` embeddings |
 | **Full-text search** | SQLite FTS5 |
-| **Document ingestion** | R2 storage + `IngestAgent` (background AI extraction) |
+| **Document ingestion** | R2 storage + `IngestAgent` + Workers AI `toMarkdown` (PDF support) |
 | **Wiki linting** | `LintAgent` — orphan detection, broken links, stub articles |
-| **MCP server** | `/mcp` (standard) and `/codemode-mcp` (CodeMode-wrapped) |
-| **CDN caching** | `caches.default` with ETag, stale-while-revalidate, programmatic eviction |
+| **MCP server** | Per-wiki `/wiki/:id/mcp` and `/wiki/:id/codemode-mcp` |
+| **CDN caching** | `caches.default` with ETag, per-wiki cache partitions, programmatic eviction |
+| **Auth** | Optional `API_KEY` Bearer token for write paths; Cloudflare Access for WebSocket |
+| **UI** | Vanilla HTML/CSS/JS (no framework) — four tabs: Chat, Browse, Documents, MCP |
 | **CI/CD** | GitHub Actions → `wrangler deploy` on push to `main` |
 
 ---
@@ -25,26 +28,62 @@ An AI-maintained, interlinked personal knowledge base. Upload raw documents; the
 ## Architecture
 
 ```
-Browser (React SPA)
+Browser (Vanilla HTML/CSS/JS)
       │ WebSocket + HTTP
       ▼
 Cloudflare Worker (Entry Point)
-      ├── /mcp, /codemode-mcp  ─────────────────► WikiMcpServer
-      │                                            (stateless, routes to WikiAgent RPC)
-      ├── GET  /api/article/:slug  ◄──── CDN cache (5 min ETag)
-      ├── GET  /api/articles       ◄──── CDN cache (1 min, stale-while-revalidate)
-      ├── GET  /api/stats          ◄──── CDN cache (1 min)
-      ├── POST /api/upload  ────────────────────► R2 Bucket
-      ├── POST /api/ingest/:id  ────────────────► IngestAgent DO
-      ├── POST /api/lint  ──────────────────────► LintAgent DO
-      └── /api/agent/*  ────────────────────────► WikiAgent DO
-                                                      │
-                                                      ├── SQLite (articles, links, docs)
-                                                      ├── R2 (raw doc content)
-                                                      ├── Vectorize (embeddings)
-                                                      └── Workers AI + CodeMode
-                                                              └── Dynamic Worker sandbox
+      ├── GET  /wiki/:id/article/:slug  ◄─── CDN cache (5 min ETag, per-wiki)
+      ├── GET  /wiki/:id/articles       ◄─── CDN cache (1 min, stale-while-revalidate)
+      ├── GET  /wiki/:id/stats          ◄─── CDN cache (1 min)
+      ├── POST /wiki/:id/upload  ─────────────────────► R2 Bucket
+      ├── POST /wiki/:id/ingest/:docId  ──────────────► IngestAgent DO
+      ├── POST /wiki/:id/lint  ───────────────────────► LintAgent DO
+      ├── GET  /wiki/:id/mcp, /wiki/:id/codemode-mcp  ► WikiMcpServer
+      └── WS   /agents/wiki-agent/:id  ───────────────► WikiAgent DO
+                                                             │
+                                                             ├── SQLite (articles, links, docs)
+                                                             ├── R2 (raw doc bytes)
+                                                             ├── Vectorize (embeddings)
+                                                             └── Workers AI + CodeMode
+                                                                     └── Dynamic Worker sandbox
 ```
+
+---
+
+## Multi-Wiki Support
+
+Every API path includes the wiki ID: `/wiki/{wikiId}/...`
+
+```bash
+# Default wiki
+curl https://YOUR_WORKER.workers.dev/wiki/default/articles
+
+# A separate "research" wiki
+curl https://YOUR_WORKER.workers.dev/wiki/research/articles
+
+# Chat with a specific wiki via WebSocket
+wss://YOUR_WORKER.workers.dev/agents/wiki-agent/research
+```
+
+Each wiki ID maps to its own DurableObject instance (isolated SQLite + R2 prefix + cache partition). The UI header has a wiki ID input to switch at runtime.
+
+---
+
+## Authentication
+
+| Endpoint class | Auth |
+|---|---|
+| `GET /wiki/:id/*` reads | None (public, CDN-cached) |
+| `POST /wiki/:id/*` writes | `Authorization: Bearer <API_KEY>` (if `API_KEY` env var is set) |
+| `/wiki/:id/mcp`, `/wiki/:id/codemode-mcp` | Same as writes |
+| `/agents/wiki-agent/:id` (WebSocket/chat) | Recommend [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/) |
+
+Set an API key:
+```bash
+wrangler secret put API_KEY
+```
+
+When `API_KEY` is not set the Worker is in **open mode** — fine for local dev, not for production.
 
 ---
 
@@ -70,18 +109,24 @@ Once configured, every push to `main` deploys automatically via GitHub Actions.
 
 ## MCP Configuration
 
-Connect Claude Desktop, Cursor, or any MCP client:
+Connect Claude Desktop, Cursor, or any MCP client to a specific wiki:
 
 ```json
 {
   "mcpServers": {
-    "llm-wiki": {
+    "llm-wiki-default": {
       "type": "http",
-      "url": "https://YOUR_WORKER.workers.dev/mcp"
+      "url": "https://YOUR_WORKER.workers.dev/wiki/default/mcp"
+    },
+    "llm-wiki-research": {
+      "type": "http",
+      "url": "https://YOUR_WORKER.workers.dev/wiki/research/mcp"
     }
   }
 }
 ```
+
+If `API_KEY` is set, add `"headers": { "Authorization": "Bearer <key>" }`.
 
 **Available tools:** `wiki_search`, `wiki_get_article`, `wiki_list_articles`, `wiki_get_stats`, `wiki_create_article`, `wiki_update_article`, `wiki_delete_article`, `wiki_list_documents`, `wiki_process_document`, `wiki_lint`
 
@@ -105,4 +150,3 @@ Connect Claude Desktop, Cursor, or any MCP client:
 - [Karpathy's llm-wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 - [Cloudflare CodeMode blog post](https://blog.cloudflare.com/code-mode-mcp/)
 - [Cloudflare Dynamic Workers blog post](https://blog.cloudflare.com/dynamic-workers/)
-

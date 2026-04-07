@@ -5,12 +5,12 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Static assets served by Cloudflare Workers Assets (Vite build output)
+  // Static assets served by Cloudflare Workers Assets (public/ directory)
   "assets": {
     "directory": "public",
     "not_found_handling": "single-page-application",
-    // Worker runs first for all /api/* and MCP endpoints
-    "run_worker_first": ["/api/*", "/mcp", "/mcp/*", "/codemode-mcp", "/codemode-mcp/*"]
+    // Worker handles all API, agent and MCP routes; everything else goes to static assets
+    "run_worker_first": ["/wiki/*", "/agents/*", "/health"]
   },
 
   // Durable Objects

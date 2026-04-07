@@ -16,17 +16,19 @@ Wiki articles need durable persistence with relational queries (article links, F
 4. KV store
 
 **Decision:**
-Use DurableObject with SQLite (`new_sqlite_classes` migration). This colocates the agent state (chat history, agent lifecycle) with the wiki data in a single DurableObject.
+Use DurableObject with SQLite (`new_sqlite_classes` migration) for structured metadata and FTS; R2 for raw file bytes.
 
 **Rationale:**
 - `AIChatAgent` already runs as a DurableObject; adding SQLite requires zero extra infrastructure
 - Strong consistency within the DO (no eventual consistency concerns)
-- SQLite FTS5 available for full-text search
+- SQLite FTS5 available for full-text search over article content
 - D1 would require cross-service calls, adding latency
+- R2 stores the actual file bytes; the DO only stores an `r2_key` pointer plus metadata — keeps the DO lean and lets R2 stream large files without buffering in Worker memory
 
 **Consequences:**
 - Wiki data is tied to one geographic location (DO location)
 - Storage limit: 10GB per DO (more than sufficient for a personal wiki)
+- PDF text extraction: use Workers AI `toMarkdown` API on the R2 object at ingest time
 
 ---
 
@@ -134,29 +136,31 @@ Default to `@cf/moonshotai/kimi-k2.5` (same as codemode example, strong at code 
 
 ---
 
-## ADR-006: Vite + React for Frontend
+## ADR-006: Vanilla HTML/CSS/JS for Frontend
 
 **Status:** Accepted
 
 **Context:**
-Frontend framework for the wiki UI. Options:
-1. Vite + React (used in all Cloudflare agent examples)
+Frontend for the wiki UI. Options:
+1. Vite + React (used in Cloudflare agent examples)
 2. Hono JSX (lighter, server-rendered)
-3. Plain HTML/JS
+3. Plain HTML/CSS/JS (no framework)
 4. Next.js (too heavy for Workers)
 
 **Decision:**
-Use Vite + React, matching the codemode and dynamic-workers examples.
+Use plain HTML/CSS/JavaScript served as static assets from `public/`. Vite still bundles the Worker; the client is not processed by Vite.
 
 **Rationale:**
-- `@cloudflare/vite-plugin` provides seamless local development with `wrangler dev`
-- `useAgentChat` from `@cloudflare/ai-chat/react` handles WebSocket + streaming
-- Consistent with Cloudflare's agent ecosystem
-- Tailwind CSS v4 for rapid styling
+- No build step or framework dependency for the UI
+- `public/app.js` and `public/styles.css` are served verbatim by Cloudflare Workers Assets
+- WebSocket chat via native `WebSocket` API to `/agents/wiki-agent/:wikiId`
+- CSS custom properties for theming; no Tailwind needed
+- Smaller deployment artifact; simpler dependency graph
 
 **Consequences:**
-- Requires Vite build step in CI/CD
-- `public/` directory served via Cloudflare Workers Assets
+- No JSX/TypeScript in client code; plain ES module syntax only
+- State management is manual (module-level state object + localStorage)
+- `@cloudflare/vite-plugin` still handles the Worker bundle; removing React has no impact on Workers Assets serving
 
 ---
 
@@ -210,15 +214,21 @@ Use `caches.default` with `ETag`/conditional-request support and programmatic ev
 **Cache TTLs:**
 | Endpoint | max-age | stale-while-revalidate |
 |----------|---------|----------------------|
-| GET /api/article/:slug | 300s (5 min) | 3600s (1 hr) |
-| GET /api/articles | 60s | 600s (10 min) |
-| GET /api/stats | 60s | 300s |
-| GET /api/articles?search=... | 30s | 120s |
+| `GET /wiki/:wikiId/article/:slug` | 300s (5 min) | 3600s (1 hr) |
+| `GET /wiki/:wikiId/articles` | 60s | 600s (10 min) |
+| `GET /wiki/:wikiId/stats` | 60s | 300s |
+| `GET /wiki/:wikiId/articles?search=…` | 30s | 120s |
+
+The wikiId is part of the URL path so each wiki instance has a completely separate cache partition automatically.
 
 **Eviction trigger:** Any write (createArticle, updateArticle, deleteArticle) evicts:
-- `/api/article/{slug}` (the specific article)
-- `/api/articles` (the full list)
-- `/api/stats` (counts may have changed)
+- `/wiki/{wikiId}/article/{slug}` (the specific article)
+- `/wiki/{wikiId}/articles` (the full list)
+- `/wiki/{wikiId}/stats` (counts may have changed)
+
+**`caches.default` scope:**
+- **Zone-bound worker (custom domain):** `caches.default` IS the global Cloudflare CDN edge cache. Responses are stored at the PoP nearest each user and served globally.
+- **workers.dev subdomain:** `caches.default` is a per-datacenter cache (useful for reducing DO hits within a DC, but not globally shared). For full global CDN benefit, deploy on a custom domain.
 
 **HOST env var:** DurableObjects need `env.HOST` to build absolute URLs for `caches.default.delete()`. This is set as a Worker secret/var (see CI/CD setup).
 
@@ -226,6 +236,10 @@ Use `caches.default` with `ETag`/conditional-request support and programmatic ev
 - `caches.default` operations are no-ops in `wrangler dev` (local dev); articles are always fresh locally
 - In production, stale-while-revalidate means a write may take up to `max-age` seconds to appear at all PoPs (acceptable for a personal wiki)
 - Zone-wide "purge all" is not supported without the Zones API; `evictAll()` only clears list/stats endpoints
+
+**Status:** Accepted
+
+## ADR-007: GitHub Actions for CI/CD
 
 **Status:** Accepted
 

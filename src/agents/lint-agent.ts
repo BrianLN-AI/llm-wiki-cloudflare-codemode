@@ -58,6 +58,7 @@ interface ArticleRow {
 }
 
 interface WikiAgentStub {
+  initWikiId(id: string): Promise<void>;
   getAllArticlesForLint(): Promise<ArticleRow[]>;
   updateArticleProgrammatic(
     idOrSlug: string,
@@ -69,13 +70,17 @@ interface WikiAgentStub {
 
 export class LintAgent extends Agent<Env> {
   /**
-   * Run the full lint pass over the wiki.
-   * @param fix When true, applies safe automatic fixes.
+   * Run the full lint pass over a wiki.
+   * @param fix     When true, applies safe automatic fixes.
+   * @param wikiId  The wiki instance to lint (default: "default").
    */
-  async lintWiki(fix = false): Promise<LintReport> {
+  async lintWiki(fix = false, wikiId = "default"): Promise<LintReport> {
     const wikiStub = this.env.WikiAgent.get(
-      this.env.WikiAgent.idFromName("default")
+      this.env.WikiAgent.idFromName(wikiId)
     ) as unknown as WikiAgentStub;
+
+    // Ensure wikiId is stored so that fix writes evict the correct cache paths
+    if (fix) await wikiStub.initWikiId(wikiId);
 
     const articles = await wikiStub.getAllArticlesForLint();
     const issues: LintIssue[] = [];

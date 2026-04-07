@@ -38,6 +38,7 @@ const ExtractionSchema = z.object({
 type ExtractionResult = z.infer<typeof ExtractionSchema>;
 
 interface WikiAgentStub {
+  initWikiId(id: string): Promise<void>;
   createArticleProgrammatic(
     title: string,
     content: string,
@@ -75,17 +76,20 @@ export class IngestAgent extends Agent<Env> {
    * Process a single raw document: read from R2, extract concepts via AI,
    * create wiki articles, update document status.
    *
-   * This method is called via DurableObject RPC from the main Worker or
-   * from an MCP tool invocation.
+   * @param docId   The raw document ID to process.
+   * @param wikiId  The wiki instance to write articles into (default: "default").
    */
-  async processDocument(docId: string): Promise<{
+  async processDocument(docId: string, wikiId = "default"): Promise<{
     success: boolean;
     articleIds?: string[];
     error?: string;
   }> {
     const wikiStub = this.env.WikiAgent.get(
-      this.env.WikiAgent.idFromName("default")
+      this.env.WikiAgent.idFromName(wikiId)
     ) as unknown as WikiAgentStub;
+
+    // Ensure the DO knows its own wikiId for correct CDN cache eviction paths
+    await wikiStub.initWikiId(wikiId);
 
     // 1. Fetch document metadata
     const doc = await wikiStub.getDocumentProgrammatic(docId);
