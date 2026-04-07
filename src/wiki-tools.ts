@@ -135,6 +135,9 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
           }
         }
 
+        // Evict CDN cache for this slug and the article list
+        await evictArticleCache(env, finalSlug);
+
         // Store embedding in Vectorize if available
         if (env.WIKI_VECTORS) {
           try {
@@ -254,6 +257,7 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
           }
         }
 
+        if (updated) await evictArticleCache(env, updated.slug);
         return updated ?? { error: "Article not found after update" };
       }
     }),
@@ -386,6 +390,7 @@ export function createWikiTools(sql: SqlStorage, env: Env) {
           }
         }
 
+        await evictArticleCache(env, resolvedSlug ?? resolvedId);
         return { deleted: resolvedId };
       }
     }),
@@ -555,4 +560,21 @@ async function generateEmbedding(env: Env, text: string): Promise<number[] | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * Evict CDN cache for a specific article slug plus shared list/stats endpoints.
+ * Uses caches.default which is available in both Workers and DurableObjects.
+ * No-ops silently when HOST is not configured (local dev).
+ */
+async function evictArticleCache(env: Env, slug: string): Promise<void> {
+  const host = env.HOST;
+  if (!host) return;
+  const origin = host.startsWith("http") ? host : `https://${host}`;
+  const base = origin.replace(/\/$/, "");
+  await Promise.allSettled([
+    caches.default.delete(`${base}/api/article/${slug}`),
+    caches.default.delete(`${base}/api/articles`),
+    caches.default.delete(`${base}/api/stats`)
+  ]);
 }

@@ -160,7 +160,72 @@ Use Vite + React, matching the codemode and dynamic-workers examples.
 
 ---
 
-## ADR-007: GitHub Actions for CI/CD
+## ADR-008: MCP Server via Stateless Worker Handler
+
+**Status:** Accepted
+
+**Context:**
+External AI clients (Claude Desktop, Cursor, Copilot) need to connect to the wiki via MCP. Options:
+1. Stateful `McpAgent` DurableObject per session
+2. Stateless `createMcpHandler()` in the main Worker, routing through WikiAgent RPC
+3. Separate MCP Worker deployment
+
+**Decision:**
+Use option 2: stateless `createMcpHandler()` factory in the main Worker.
+
+**Rationale:**
+- WikiAgent already holds all state (SQLite); MCP tools just call `@callable` methods via DO RPC
+- No additional DurableObject class required for MCP state
+- Both `/mcp` (raw tool calling) and `/codemode-mcp` (CodeMode-wrapped) served from same Worker
+- `codeMcpServer()` from `@cloudflare/codemode/mcp` wraps any `McpServer` with Dynamic Workers sandbox
+
+**Consequences:**
+- MCP requests hit the main Worker then fan out to WikiAgent DO via RPC
+- Session continuity for MCP is handled by the MCP client (standard MCP behaviour)
+- If WikiAgent is cold-started, first MCP request may be slow (~100ms)
+
+---
+
+## ADR-009: CDN Caching via caches.default
+
+**Status:** Accepted
+
+**Context:**
+Wiki article reads should be served from Cloudflare's CDN edge without hitting the DurableObject on every request. Options:
+1. `caches.default` (Workers Cache API) — programmatic control
+2. Cloudflare Cache Rules (zone-level) — no programmatic eviction without Zones API
+3. KV store as read cache — adds latency vs edge cache
+4. No caching — full latency on every request
+
+**Decision:**
+Use `caches.default` with `ETag`/conditional-request support and programmatic eviction on writes.
+
+**Rationale:**
+- `caches.default` IS the Cloudflare CDN edge cache — responses stored here are served at the PoP nearest the user
+- Full programmatic control: `match()`, `put()`, `delete()` from within Workers and DurableObjects
+- ETag + `If-None-Match` support reduces bandwidth for unchanged articles (304 responses)
+- Cache eviction is triggered synchronously from write paths (create/update/delete article)
+- No external API calls needed (unlike Cloudflare Zones API purge)
+
+**Cache TTLs:**
+| Endpoint | max-age | stale-while-revalidate |
+|----------|---------|----------------------|
+| GET /api/article/:slug | 300s (5 min) | 3600s (1 hr) |
+| GET /api/articles | 60s | 600s (10 min) |
+| GET /api/stats | 60s | 300s |
+| GET /api/articles?search=... | 30s | 120s |
+
+**Eviction trigger:** Any write (createArticle, updateArticle, deleteArticle) evicts:
+- `/api/article/{slug}` (the specific article)
+- `/api/articles` (the full list)
+- `/api/stats` (counts may have changed)
+
+**HOST env var:** DurableObjects need `env.HOST` to build absolute URLs for `caches.default.delete()`. This is set as a Worker secret/var (see CI/CD setup).
+
+**Consequences:**
+- `caches.default` operations are no-ops in `wrangler dev` (local dev); articles are always fresh locally
+- In production, stale-while-revalidate means a write may take up to `max-age` seconds to appear at all PoPs (acceptable for a personal wiki)
+- Zone-wide "purge all" is not supported without the Zones API; `evictAll()` only clears list/stats endpoints
 
 **Status:** Accepted
 
