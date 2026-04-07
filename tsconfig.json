@@ -8,8 +8,7 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true,
-    "types": ["@cloudflare/workers-types"]
+    "skipLibCheck": true
   },
-  "include": ["src/**/*", "env.d.ts", "vite.config.ts"]
+  "include": ["src/**/*", "env.d.ts", "worker-configuration.d.ts", "vite.config.ts"]
 }

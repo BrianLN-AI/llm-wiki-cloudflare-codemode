@@ -317,14 +317,14 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
               `%"${tag}"%`,
               limit ?? 50
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
         } else {
           rows = sql
             .exec(
               "SELECT id, title, slug, summary, tags, updated_at FROM articles ORDER BY updated_at DESC LIMIT ?",
               limit ?? 50
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
         }
         return rows.map(parseArticleRow);
       }
@@ -350,7 +350,7 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
               query,
               limit ?? 10
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
           return rows.map(parseArticleRow);
         } catch {
           // FTS might fail on some query syntax; fall back to LIKE
@@ -364,7 +364,7 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
               `%${query}%`,
               limit ?? 10
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
           return rows.map(parseArticleRow);
         }
       }
@@ -455,7 +455,7 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
                WHERE l.from_slug = ?`,
               slug
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
         }
 
         if (direction === "incoming" || direction === "both") {
@@ -467,7 +467,7 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
                WHERE l.to_slug = ?`,
               slug
             )
-            .toArray() as ArticleRow[];
+            .toArray() as unknown[] as ArticleRow[];
         }
 
         return result;

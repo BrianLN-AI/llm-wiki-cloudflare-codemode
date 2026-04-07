@@ -9,7 +9,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "types": "wrangler types env.d.ts --include-runtime false",
+    "types": "wrangler types",
     "deploy": "vite build && wrangler deploy",
     "lint": "tsc --noEmit"
   },
@@ -24,7 +24,6 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.31.0",
-    "@cloudflare/workers-types": "^4.20260405.1",
     "@types/node": "^25.5.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.5",

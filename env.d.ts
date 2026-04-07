@@ -1,29 +1,9 @@
 /* eslint-disable */
-// Run `npm run types` to regenerate after wrangler.jsonc changes
+// Augments the generated Cloudflare.Env (worker-configuration.d.ts) with secret/variable
+// bindings that are not declared as wrangler.jsonc bindings.
+// Re-run `npm run types` after changing wrangler.jsonc to regenerate worker-configuration.d.ts.
 declare namespace Cloudflare {
-  interface GlobalProps {
-    mainModule: typeof import("./src/server");
-    durableNamespaces: "WikiAgent" | "IngestAgent" | "LintAgent";
-  }
   interface Env {
-    // Durable Objects
-    WikiAgent: DurableObjectNamespace<import("./src/server").WikiAgent>;
-    IngestAgent: DurableObjectNamespace<import("./src/agents/ingest-agent").IngestAgent>;
-    LintAgent: DurableObjectNamespace<import("./src/agents/lint-agent").LintAgent>;
-
-    // R2 – raw document storage
-    RAW_DOCS: R2Bucket;
-
-    // Vectorize – semantic search (384-dim, bge-small-en-v1.5)
-    WIKI_VECTORS: VectorizeIndex;
-
-    // Workers AI – LLM + embeddings
-    AI: Ai;
-
-    // Dynamic Worker Loader – isolated CodeMode sandboxes
-    LOADER: WorkerLoader;
-
-    // Secrets / vars
     /** Override the default Workers AI model (e.g. "@cf/meta/llama-3.3-70b-instruct") */
     WORKERS_AI_MODEL?: string;
     /**
@@ -34,12 +14,11 @@ declare namespace Cloudflare {
     /**
      * Optional API key for protecting write endpoints and MCP.
      * When set, callers must send `Authorization: Bearer <key>`.
-     * Reads (GET) remain public. Use Cloudflare Access for full protection.
+     * Reads (GET) remain public.
      */
     API_KEY?: string;
   }
 }
-interface Env extends Cloudflare.Env {}
 
 type StringifyValues<EnvType extends Record<string, unknown>> = {
   [Binding in keyof EnvType]: EnvType[Binding] extends string
