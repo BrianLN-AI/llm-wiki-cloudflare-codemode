@@ -47,7 +47,7 @@ function errorResult(message: string) {
 // ── Server factory ────────────────────────────────────────────────────────────
 
 type WikiAgentStub = {
-  getArticles(search?: string): Promise<unknown[]>;
+  getArticles(search?: string, tag?: string): Promise<unknown[]>;
   getArticleBySlug(slug: string): Promise<unknown>;
   getRawDocuments(): Promise<unknown[]>;
   registerUploadedDocument(
@@ -71,10 +71,20 @@ type WikiAgentStub = {
   getWikiStats(): Promise<unknown>;
 };
 
+type IngestStub = {
+  processDocument(docId: string, wikiId: string): Promise<unknown>;
+};
+
+type LintStub = {
+  lintWiki(fix: boolean, wikiId: string): Promise<unknown>;
+};
+
 export function createWikiMcpServer(
   wikiStub: WikiAgentStub,
   cache?: WikiCacheManager,
-  wikiId = "default"
+  wikiId = "default",
+  env?: Env,
+  ctx?: ExecutionContext
 ): McpServer {
   const server = new McpServer({
     name: "llm-wiki",
@@ -170,9 +180,9 @@ export function createWikiMcpServer(
           .describe("Filter articles by tag")
       }
     },
-    async ({ tag: _tag }) => {
+    async ({ tag }) => {
       try {
-        const articles = await wikiStub.getArticles();
+        const articles = await wikiStub.getArticles(undefined, tag);
         return textResult(articles);
       } catch (e) {
         return errorResult(String(e));
@@ -338,14 +348,24 @@ export function createWikiMcpServer(
       }
     },
     async ({ documentId }) => {
-      // This is a fire-and-forget signal — actual processing happens in IngestAgent.
-      // Return a job ID that the caller can use to check status.
-      return textResult({
-        queued: true,
-        documentId,
-        message:
-          "Document queued for processing. Use wiki_list_documents to check status."
-      });
+      if (!env) return errorResult("Server not configured for document processing");
+      try {
+        const ingestStub = env.IngestAgent.get(
+          env.IngestAgent.idFromName(`ingest-${wikiId}-${documentId}`)
+        ) as unknown as IngestStub;
+        const work = ingestStub
+          .processDocument(documentId, wikiId)
+          .catch((e) => console.error(`IngestAgent failed for ${wikiId}/${documentId}:`, e));
+        if (ctx) ctx.waitUntil(work); else void work;
+        return textResult({
+          queued: true,
+          documentId,
+          wikiId,
+          message: "Document queued for processing. Use wiki_list_documents to check status."
+        });
+      } catch (e) {
+        return errorResult(String(e));
+      }
     }
   );
 
@@ -361,12 +381,21 @@ export function createWikiMcpServer(
           .describe("Automatically apply safe fixes (default false — report only)")
       }
     },
-    async ({ fix: _fix }) => {
-      // Delegated to LintAgent; here we return instructions for the LLM.
-      return textResult({
-        message:
-          "Lint triggered. Connect to the chat interface at / to see real-time results from the LintAgent."
-      });
+    async ({ fix }) => {
+      if (!env) return errorResult("Server not configured for linting");
+      try {
+        const lintStub = env.LintAgent.get(
+          env.LintAgent.idFromName(`lint-${wikiId}`)
+        ) as unknown as LintStub;
+        const report = await lintStub.lintWiki(fix ?? false, wikiId);
+        // Evict list/stats caches if fixes were applied
+        if (cache && fix && (report as { fixesApplied?: number }).fixesApplied) {
+          void cache.evictAll(wikiId);
+        }
+        return textResult(report);
+      } catch (e) {
+        return errorResult(String(e));
+      }
     }
   );
 
@@ -386,7 +415,7 @@ export function createMcpHandlers(
       const stub = env.WikiAgent.get(
         env.WikiAgent.idFromName(wikiId)
       ) as unknown as WikiAgentStub;
-      const server = createWikiMcpServer(stub, cache, wikiId);
+      const server = createWikiMcpServer(stub, cache, wikiId, env, ctx);
       return createMcpHandler(server, { route: `/wiki/${wikiId}/mcp` })(request, env, ctx);
     },
 
@@ -398,7 +427,7 @@ export function createMcpHandlers(
       const stub = env.WikiAgent.get(
         env.WikiAgent.idFromName(wikiId)
       ) as unknown as WikiAgentStub;
-      const wikiServer = createWikiMcpServer(stub, cache, wikiId);
+      const wikiServer = createWikiMcpServer(stub, cache, wikiId, env, ctx);
       const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
       const server = await codeMcpServer({ server: wikiServer, executor });
       return createMcpHandler(server, { route: `/wiki/${wikiId}/codemode-mcp` })(

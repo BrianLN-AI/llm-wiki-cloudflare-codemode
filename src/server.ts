@@ -118,10 +118,19 @@ export class WikiAgent extends AIChatAgent<Env> {
 
   // ── Callables: REST API ───────────────────────────────────────────────────
 
-  @callable({ description: "List wiki articles with optional FTS search" })
-  async getArticles(search?: string) {
+  @callable({ description: "List wiki articles with optional FTS search or tag filter" })
+  async getArticles(search?: string, tag?: string) {
     this._ensureDb();
     const sql = this.ctx.storage.sql;
+    if (tag) {
+      return sql
+        .exec(
+          `SELECT id, title, slug, summary, tags, updated_at FROM articles
+           WHERE tags LIKE ? ORDER BY updated_at DESC LIMIT 100`,
+          `%"${tag}"%`
+        )
+        .toArray();
+    }
     if (search) {
       try {
         return sql
@@ -564,9 +573,48 @@ async function handleGetDocuments(
   return jsonResponse(docs, { maxAge: 0 });
 }
 
+async function handleCreateArticle(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  wikiId: string
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, { status: 405 });
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await request.json() as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { title, content, summary, tags, sourceIds } = body;
+  if (typeof title !== "string" || !title.trim()) {
+    return jsonResponse({ error: "title is required" }, { status: 400 });
+  }
+  if (typeof content !== "string" || !content.trim()) {
+    return jsonResponse({ error: "content is required" }, { status: 400 });
+  }
+  try {
+    const stub = getWikiStub(env, wikiId);
+    const result = await stub.createArticleProgrammatic(
+      title,
+      content,
+      typeof summary === "string" ? summary : "",
+      Array.isArray(tags) ? tags as string[] : [],
+      Array.isArray(sourceIds) ? sourceIds as string[] : []
+    );
+    ctx.waitUntil(WikiCacheManager.fromRequest(request).evictAll(wikiId));
+    return jsonResponse(result, { status: 201 });
+  } catch (e) {
+    return jsonResponse({ error: String(e) }, { status: 500 });
+  }
+}
+
 async function handleUpload(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   wikiId: string
 ): Promise<Response> {
   if (request.method !== "POST") {
@@ -609,6 +657,8 @@ async function handleUpload(
   try {
     const stub = getWikiStub(env, wikiId);
     await stub.registerUploadedDocument(id, file.name, r2Key, baseType);
+    // Evict stats cache so pendingDocuments reflects the new upload immediately
+    ctx.waitUntil(WikiCacheManager.fromRequest(request).evictAll(wikiId));
   } catch (e) {
     console.error("Failed to register document in WikiAgent:", e);
   }
@@ -700,8 +750,9 @@ export default {
         if (authErr) return authErr;
       }
 
-      // ── CDN-cached reads ─────────────────────────────────────────────────
+      // ── CDN-cached reads and /articles POST ─────────────────────────────
       if (sub === "/articles" || sub === "/articles/") {
+        if (request.method === "POST") return handleCreateArticle(request, env, ctx, wikiId);
         return handleGetArticles(request, env, ctx, wikiId);
       }
       const articleMatch = sub.match(/^\/article\/(.+)$/);
@@ -716,7 +767,7 @@ export default {
       }
 
       // ── Write paths (no CDN cache, auth required above) ──────────────────
-      if (sub === "/upload") return handleUpload(request, env, wikiId);
+      if (sub === "/upload") return handleUpload(request, env, ctx, wikiId);
       const ingestMatch = sub.match(/^\/ingest\/(.+)$/);
       if (ingestMatch) return handleIngest(request, env, ctx, wikiId, ingestMatch[1]);
       if (sub === "/lint") return handleLint(request, env, ctx, wikiId);
@@ -738,5 +789,20 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+
+  // ── Scheduled trigger: daily cron lint ──────────────────────────────────
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    // Fan-out to LintAgent for the default wiki.
+    // To lint additional named wikis, maintain a registry in a KV or enumerate
+    // DO names — for now the default wiki covers the primary use case.
+    const stub = env.LintAgent.get(
+      env.LintAgent.idFromName("lint-default")
+    ) as unknown as { lintWiki(fix: boolean, wikiId: string): Promise<unknown> };
+    ctx.waitUntil(
+      stub.lintWiki(false, "default").catch((e) =>
+        console.error("Scheduled lint failed for wiki/default:", e)
+      )
+    );
   }
 } satisfies ExportedHandler<Env>;

@@ -104,18 +104,43 @@ export class IngestAgent extends Agent<Env> {
     await wikiStub.markDocumentProcessingProgrammatic(docId);
 
     try {
-      // 3. Read content from R2
+      // 3. Read content from R2, converting PDF/HTML to markdown via Workers AI
       if (!this.env.RAW_DOCS) {
         throw new Error("R2 bucket (RAW_DOCS) not configured");
       }
       const obj = await this.env.RAW_DOCS.get(doc.r2_key);
       if (!obj) throw new Error(`File not found in R2: ${doc.r2_key}`);
 
-      const rawText = await obj.text();
-      if (!rawText.trim()) throw new Error("Document is empty");
+      let textContent: string;
+      const ct = doc.content_type.toLowerCase();
+      const needsConversion = ct.includes("pdf") || ct.includes("html");
+      // Grab AI binding once — same this.env pattern used throughout this method
+      const aiBinding = this.env.AI as unknown as {
+        toMarkdown(inputs: { name: string; blob: Blob }[]): Promise<{ name: string; data: string }[]>;
+      } | undefined;
+
+      if (needsConversion && aiBinding) {
+        try {
+          const arrayBuffer = await obj.arrayBuffer();
+          const blob = new Blob([arrayBuffer], { type: doc.content_type });
+          const mdResults = await aiBinding.toMarkdown([{ name: doc.filename, blob }]);
+          textContent = mdResults[0]?.data ?? "";
+          if (!textContent.trim()) {
+            // Fallback: raw text if conversion returned empty
+            textContent = new TextDecoder().decode(arrayBuffer);
+          }
+        } catch {
+          // Conversion failed — fall back to raw text extraction
+          textContent = await obj.text();
+        }
+      } else {
+        textContent = await obj.text();
+      }
+
+      if (!textContent.trim()) throw new Error("Document is empty");
 
       // Truncate to avoid context limits (approx 100K chars ≈ 25K tokens)
-      const truncatedText = rawText.slice(0, 100_000);
+      const truncatedText = textContent.slice(0, 100_000);
 
       // 4. Extract structured articles via Workers AI
       const extraction = await this.extractArticles(doc.filename, truncatedText);

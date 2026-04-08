@@ -6,5 +6,8 @@ export default defineConfig({
   plugins: [agents(), cloudflare()],
   define: {
     __filename: "'index.ts'"
+  },
+  build: {
+    outDir: "public"
   }
 });

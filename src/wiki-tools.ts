@@ -528,9 +528,9 @@ export function createWikiTools(sql: SqlStorage, env: Env, wikiId = "default") {
           .toArray()[0] as { count: number };
 
         return {
-          articleCount: articles.count,
-          linkCount: links.count,
-          documentCount: docs.count,
+          articles: articles.count,
+          links: links.count,
+          documents: docs.count,
           pendingDocuments: pending.count
         };
       }

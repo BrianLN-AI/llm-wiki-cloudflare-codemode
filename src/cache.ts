@@ -210,6 +210,12 @@ export async function serveCached(
   build: () => Promise<Response>,
   ctx: ExecutionContext
 ): Promise<Response> {
+  // Honour Cache-Control: no-cache / no-store from the client (e.g. browser forced-refresh)
+  const reqCC = request.headers.get("Cache-Control") ?? "";
+  if (reqCC.includes("no-cache") || reqCC.includes("no-store")) {
+    return build();
+  }
+
   // 1. Try cache hit
   const cached = await cache.match(path);
   if (cached) {
