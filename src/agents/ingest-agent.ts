@@ -20,6 +20,21 @@ import { createWorkersAI } from "workers-ai-provider";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+/**
+ * Minimal interface for the Workers AI toMarkdown feature.
+ * Defined here so type-checking covers all call sites; cast with `as unknown as ToMarkdownAI`.
+ * @see https://developers.cloudflare.com/workers-ai/features/markdown-conversion/
+ */
+interface ToMarkdownResult {
+  name: string;
+  data: string;
+  mimeType?: string;
+  tokens?: number;
+}
+interface ToMarkdownAI {
+  toMarkdown(inputs: { name: string; blob: Blob }[]): Promise<ToMarkdownResult[]>;
+}
+
 // Schema for structured AI extraction output
 const ExtractionSchema = z.object({
   articles: z.array(
@@ -115,22 +130,24 @@ export class IngestAgent extends Agent<Env> {
       const ct = doc.content_type.toLowerCase();
       const needsConversion = ct.includes("pdf") || ct.includes("html");
       // Grab AI binding once — same this.env pattern used throughout this method
-      const aiBinding = this.env.AI as unknown as {
-        toMarkdown(inputs: { name: string; blob: Blob }[]): Promise<{ name: string; data: string }[]>;
-      } | undefined;
+      const aiBinding = this.env.AI as unknown as ToMarkdownAI | undefined;
 
       if (needsConversion && aiBinding) {
         try {
           const arrayBuffer = await obj.arrayBuffer();
           const blob = new Blob([arrayBuffer], { type: doc.content_type });
           const mdResults = await aiBinding.toMarkdown([{ name: doc.filename, blob }]);
-          textContent = mdResults[0]?.data ?? "";
-          if (!textContent.trim()) {
-            // Fallback: raw text if conversion returned empty
+          const converted = mdResults.length > 0 ? mdResults[0].data : null;
+          if (converted && converted.trim()) {
+            textContent = converted;
+          } else {
+            // Conversion returned empty output — fall back to raw text
+            console.warn(`toMarkdown returned empty for ${doc.filename}; falling back to plain text`);
             textContent = new TextDecoder().decode(arrayBuffer);
           }
-        } catch {
+        } catch (e) {
           // Conversion failed — fall back to raw text extraction
+          console.warn(`toMarkdown failed for ${doc.filename}: ${e}; falling back to plain text`);
           textContent = await obj.text();
         }
       } else {

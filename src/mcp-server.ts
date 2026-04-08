@@ -356,7 +356,14 @@ export function createWikiMcpServer(
         const work = ingestStub
           .processDocument(documentId, wikiId)
           .catch((e) => console.error(`IngestAgent failed for ${wikiId}/${documentId}:`, e));
-        if (ctx) ctx.waitUntil(work); else void work;
+        // ctx.waitUntil keeps the Worker alive until ingestion completes.
+        // ctx is always provided via createMcpHandlers; log a warning if absent.
+        if (ctx) {
+          ctx.waitUntil(work);
+        } else {
+          console.warn("wiki_process_document: no ExecutionContext — ingestion may be cut short");
+          void work;
+        }
         return textResult({
           queued: true,
           documentId,

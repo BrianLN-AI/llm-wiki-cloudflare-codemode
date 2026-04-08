@@ -123,11 +123,14 @@ export class WikiAgent extends AIChatAgent<Env> {
     this._ensureDb();
     const sql = this.ctx.storage.sql;
     if (tag) {
+      // Escape LIKE wildcards in the tag value to avoid unintended pattern matching.
+      // Tags are stored as JSON arrays; the pattern matches `"<tag>"` inside the JSON string.
+      const safetag = tag.replace(/[%_\\]/g, "\\$&");
       return sql
         .exec(
           `SELECT id, title, slug, summary, tags, updated_at FROM articles
-           WHERE tags LIKE ? ORDER BY updated_at DESC LIMIT 100`,
-          `%"${tag}"%`
+           WHERE tags LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 100`,
+          `%"${safetag}"%`
         )
         .toArray();
     }
